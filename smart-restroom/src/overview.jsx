@@ -1,8 +1,12 @@
 import React, { useMemo, useEffect, useState } from "react";
 import { motion } from "framer-motion";
+import { useNavigate } from "react-router-dom";
+import { HiArrowLeft } from "react-icons/hi";
 import bg from "./assets/bg.png"; // วางไฟล์ bg.png ใน src/assets/
 
 export default function Overview() {
+  const navigate = useNavigate();
+
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 1000);
@@ -99,6 +103,16 @@ export default function Overview() {
         backgroundRepeat: "no-repeat",
       }}
     >
+      <div className="w-full flex justify-start items-center mb-6">
+        <button
+          className="border border-transparent bg-white/80 hover:bg-white/100 text-blue-600 rounded-full p-2 transition-all duration-200 outline-none focus:ring-2 focus:ring-blue-200 shadow-md"
+          onClick={() => navigate(-1)}
+          aria-label="ย้อนกลับ"
+        >
+          <HiArrowLeft size={28} />
+        </button>
+      </div>
+
       <div className="w-full h-full flex flex-col gap-8">
         {/* Header */}
         <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
