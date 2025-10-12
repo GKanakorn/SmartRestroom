@@ -64,7 +64,7 @@ const Home = () => {
                   className="border border-blue-400 px-6 py-2 rounded-lg 
                              bg-gradient-to-r from-blue-500/80 to-blue-400/70 
                              text-white font-semibold shadow-lg shadow-blue-500/40 
-                             hover:from-blue-500 hover:to-blue-400 hover:shadow-blue-500/80 
+                             hover:from-blue-500 hover:to-blue-401 hover:shadow-blue-500/80 
                              transition-all duration-300 backdrop-blur-md"
                   onClick={() => navigate("/login")}
                 >
