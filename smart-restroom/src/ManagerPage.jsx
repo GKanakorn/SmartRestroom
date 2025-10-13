@@ -251,8 +251,8 @@ export default function ManagerPage() {
                               onClick={() => handleScore(c, n)}
                               className={`w-12 h-12 rounded-full flex justify-center items-center font-bold text-lg border-2 transition-all duration-200 ${
                                 isSelected
-                                  ? "bg-blue-700 text-white shadow-lg scale-105 border-blue-700"
-                                  : "bg-white text-blue-500 shadow hover:bg-blue-50 border-blue-200"
+                                  ? " bg-gray-900 text-black-800 shadow-lg scale-100"
+                                  : " bg-white text-blue-500 shadow-lg scale-90"
                               }`}
                             >
                               {n}
