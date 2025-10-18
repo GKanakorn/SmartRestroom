@@ -1,0 +1,5 @@
+Front-End/**/node_modules/
+Front-End/**/dist/
+Front-End/**/build/
+.vscode/
+.DS_Store
