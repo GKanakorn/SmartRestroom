@@ -3,3 +3,25 @@ Front-End/**/dist/
 Front-End/**/build/
 .vscode/
 .DS_Store
+# React
+Front-End/**/node_modules/
+Front-End/**/dist/
+Front-End/**/build/
+
+# Python / FastAPI
+backend/**/.venv/
+backend/**/__pycache__/
+*.pyc
+
+# Arduino build
+*.elf
+*.bin
+*.hex
+
+# VS Code / macOS
+.vscode/
+.DS_Store
+
+# Secrets
+.env
+esp32_firmware/credentials.h
