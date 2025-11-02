@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, BarChart, Bar, Legend } from "recharts";
 import { useNavigate } from "react-router-dom";
 import bg from "./assets/bg.png";
-import { Trash2 } from "lucide-react";
 
 // ===== Config =====
 const DEFAULT_BASE = "http://172.20.10.2:8080";
@@ -155,11 +154,28 @@ export default function ManagerPage() {
     };
   }, [daily]);
 
-  // โหลดข้อมูลสรุปผลการประเมินจาก localStorage
-  const [evaluationData, setEvaluationData] = useState(() => {
-    return JSON.parse(localStorage.getItem("evaluationRecords") || "[]");
-  });
+  // ข้อมูลสรุปผลการประเมิน (จะถูก fetch จาก backend)
+  const [evaluationData, setEvaluationData] = useState([]);
   const [selectedDate, setSelectedDate] = useState("all");
+  // ดึงข้อมูลการประเมินจาก backend (ทุก POLL_MS)
+  useEffect(() => {
+    async function fetchEvaluation() {
+      try {
+        const res = await fetch(`${base}/api/evaluation`, { cache: "no-store" });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data = await res.json();
+        if (!data.ok) throw new Error("Backend not ok");
+        // data.data = [{ date: "...", scores: {...} }, ...]
+        setEvaluationData(data.data);
+      } catch (err) {
+        console.error("fetchEvaluation error:", err);
+      }
+    }
+
+    fetchEvaluation();
+    const id = setInterval(fetchEvaluation, POLL_MS);
+    return () => clearInterval(id);
+  }, [base]);
 
   const filteredRecords =
     selectedDate === "all"

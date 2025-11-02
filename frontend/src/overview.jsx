@@ -75,16 +75,7 @@ export default function Overview() {
     hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: TZ,
   }).format(now);
 
-  const formatDT = (date) => {
-    const locale = lang === "th" ? "th-TH-u-ca-buddhist" : "en-GB";
-    try {
-      return new Intl.DateTimeFormat(locale, {
-        timeZone: TZ, dateStyle: "medium", timeStyle: "medium", hour12: false,
-      }).format(date);
-    } catch {
-      return date.toLocaleString(lang === "th" ? "th-TH" : "en-GB", { timeZone: TZ });
-    }
-  };
+  // (formatDT removed)
 
   const formatTimeOnly = (date) =>
     new Intl.DateTimeFormat(lang === "th" ? "th-TH" : "en-GB", {
@@ -104,7 +95,6 @@ export default function Overview() {
   const [lastPacketAt, setLastPacketAt] = useState(null);
 
   // เวลา “ทำความสะอาดล่าสุด”
-  const [lastCleanReal, setLastCleanReal] = useState("—");
   const [lastCleanRealMs, setLastCleanRealMs] = useState(null);
 
   // --- จับ "เวลาเริ่มเข้า" ของแต่ละห้อง (ใช้ฝั่ง FE) ---
@@ -125,10 +115,8 @@ export default function Overview() {
       if (typeof ts_ms === "number" && typeof last_clean_ms === "number") {
         const delta = ts_ms - last_clean_ms;
         const estimateMs = Date.now() - delta;
-        setLastCleanReal(formatDT(new Date(estimateMs)));
         setLastCleanRealMs(estimateMs);
       } else {
-        setLastCleanReal("—");
         setLastCleanRealMs(null);
       }
 

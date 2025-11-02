@@ -1,10 +1,8 @@
 import React, { useState } from "react";
 import { Save } from "lucide-react";
-import { useNavigate } from "react-router-dom";
 import bg from "./assets/bg.png";
 
 export default function EvaluationPage() {
-  const navigate = useNavigate();
   const criteria = ["ความสะอาด", "ทิชชู่", "พื้น", "กลิ่น"];
   const [scores, setScores] = useState({});
   const [evaluationData, setEvaluationData] = useState(() => {
@@ -15,17 +13,44 @@ export default function EvaluationPage() {
     setScores((prev) => ({ ...prev, [criterion]: value }));
   };
 
-  const handleSaveEvaluation = () => {
+  const handleSaveEvaluation = async () => {
     const incomplete = criteria.filter((c) => !scores[c]);
-    if (incomplete.length > 0) return alert("⚠️ กรุณาให้คะแนนครบทุกหัวข้อก่อนบันทึก");
+    if (incomplete.length > 0) {
+      alert("⚠️ กรุณาให้คะแนนครบทุกหัวข้อก่อนบันทึก");
+      return;
+    }
 
     const record = {
       date: new Date().toLocaleDateString("th-TH"),
       scores,
     };
+
+    // === ส่งขึ้น backend เพื่อให้ทุกเครื่องเห็นร่วมกัน ===
+    try {
+      const res = await fetch("http://172.20.10.2:8080/api/evaluation", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(record),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        alert("บันทึกไม่สำเร็จ (backend ตอบไม่ ok)");
+        return;
+      }
+    } catch (err) {
+      console.error(err);
+      alert("❌ บันทึกไม่สำเร็จ (ติดต่อเซิร์ฟเวอร์ไม่ได้)");
+      return;
+    }
+
+    // === อัปเดต state/localStorage ฝั่ง client ไว้เป็น cache ชั่วคราว ===
     const updated = [...evaluationData, record];
     setEvaluationData(updated);
     localStorage.setItem("evaluationRecords", JSON.stringify(updated));
+
+    // reset form
     setScores({});
     alert("✅ บันทึกผลการประเมินเรียบร้อยแล้ว!");
   };
