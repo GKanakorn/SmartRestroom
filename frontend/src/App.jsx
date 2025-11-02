@@ -5,6 +5,7 @@ import Login from "./Login";
 import StaffPage from "./StaffPage";
 import ManagerPage from "./ManagerPage";
 import Overview from "./overview";
+import EvaluationPage from "./EvaluationPage";
 
 export default function App() {
   return (
@@ -14,6 +15,7 @@ export default function App() {
       <Route path="/staff" element={<StaffPage />} />
       <Route path="/manager" element={<ManagerPage />} />
       <Route path="/overview" element={<Overview />} />
+      <Route path="/evaluation" element={<EvaluationPage />} />
     </Routes>
   );
 }

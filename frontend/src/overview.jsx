@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 import { useNavigate } from "react-router-dom";
 import { HiArrowLeft } from "react-icons/hi";
 import bg from "./assets/bg.png";
+import qrImage from "./assets/qr.png"; // <-- นำเข้า QR image
 
 // === Config ===
 const DEFAULT_BASE = "http://172.20.10.2:8080";
@@ -102,8 +103,8 @@ export default function Overview() {
   ]);
   const [lastPacketAt, setLastPacketAt] = useState(null);
 
-  // เวลา “ทำความสะอาดล่าสุด” (เก็บทั้งแบบข้อความและ millis จริง)
-  const [lastCleanReal, setLastCleanReal] = useState("—");  // ไม่ใช้แสดงแล้ว แต่เก็บไว้ได้
+  // เวลา “ทำความสะอาดล่าสุด”
+  const [lastCleanReal, setLastCleanReal] = useState("—");
   const [lastCleanRealMs, setLastCleanRealMs] = useState(null);
 
   // --- จับ "เวลาเริ่มเข้า" ของแต่ละห้อง (ใช้ฝั่ง FE) ---
@@ -122,7 +123,6 @@ export default function Overview() {
       const ts_ms = data.ts_ms;
       const last_clean_ms = data.last_clean_ts_ms;
       if (typeof ts_ms === "number" && typeof last_clean_ms === "number") {
-        // ประมาณ "เวลาจริง" ตอนกดปุ่ม
         const delta = ts_ms - last_clean_ms;
         const estimateMs = Date.now() - delta;
         setLastCleanReal(formatDT(new Date(estimateMs)));
@@ -134,7 +134,6 @@ export default function Overview() {
 
       setLastPacketAt(new Date());
 
-      // สร้างสถานะใหม่ และอัปเดต sessionStart เมื่อมี transition -> occupied
       const prevRooms = rooms;
       const mapState = (s) => (s === "vacant" ? "available" : s === "occupied" ? "occupied" : "cleaning");
 
@@ -144,7 +143,6 @@ export default function Overview() {
         const useCount = r ? r.use_count : 0;
         const totalMs = r ? r.total_use_ms : 0;
 
-        // transition detection
         const prevStatus = prevRooms[i]?.status ?? "available";
         if (status === "occupied" && prevStatus !== "occupied") {
           sessionStartRef.current[rid] = Date.now();
@@ -188,7 +186,6 @@ export default function Overview() {
     fetchLatest();
     const id = setInterval(fetchLatest, POLL_MS);
     return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lang]);
 
   // ---- สไตล์สถานะห้อง ----
@@ -224,7 +221,7 @@ export default function Overview() {
   // ---- meta ----
   const meta = {
     title: L.title,
-    lastCleanTime: lastCleanTimeOnly, // ใช้ HH:mm เท่านั้น
+    lastCleanTime: lastCleanTimeOnly,
     lastCleanBy: lang === "th" ? "—" : "—",
     usageCount: rooms.reduce((s, r) => s + (r.use || 0), 0),
     cleanDueTime: nextCleanTimeText,
@@ -322,8 +319,8 @@ export default function Overview() {
                 </div>
               </div>
               <div className="w-full grid place-items-center py-3 flex-1">
-                <div className="aspect-square w-40 max-w-full rounded-lg border border-purple-300/50 bg-purple-100/40 grid place-items-center">
-                  <div className="text-slate-500">(QR)</div>
+                <div className="aspect-square w-40 max-w-full rounded-lg border border-purple-300/50 bg-purple-100/40 grid place-items-center overflow-hidden">
+                  <img src={qrImage} alt="QR Feedback" className="w-full h-full object-contain" />
                 </div>
               </div>
             </div>
@@ -362,7 +359,6 @@ export default function Overview() {
 function RoomCard({ room, statusMap, L, lang }) {
   const s = statusMap[room.status];
 
-  // ——— กรอบวงกลม: แสดงเฉพาะสถานะล้วน ๆ (ไม่ใส่เวลา) ———
   const statusText =
     room.status === "available"
       ? L.status.available
@@ -370,7 +366,6 @@ function RoomCard({ room, statusMap, L, lang }) {
       ? L.status.occupied
       : L.status.cleaning;
 
-  // ——— บรรทัดล่าง: ถ้า occupied ให้แสดง “In use (mm:ss)” / “กำลังใช้งาน (mm:ss)” ———
   const bottomLine =
     room.status === "available"
       ? L.onlyAvail
@@ -389,15 +384,12 @@ function RoomCard({ room, statusMap, L, lang }) {
       <div className="flex flex-col items-center gap-4">
         <div className="text-base text-slate-500">{room.name}</div>
 
-        {/* กรอบวงกลมสถานะ — แสดงทุกเคส */}
         <div className="w-full max-w-[240px] rounded-full p-4 border border-white/20 bg-white/70 grid place-items-center">
           <div className="font-semibold text-xl">{statusText}</div>
         </div>
 
-        {/* บรรทัดล่าง */}
         <div className="text-sm text-slate-500">{bottomLine}</div>
 
-        {/* ตัวเลขสรุป */}
         <div className="text-xs text-slate-500">
           {lang === "th"
             ? `ใช้ไป ${room.use} ครั้ง • รวม ${(room.totalMs / 60000).toFixed(1)} นาที`
