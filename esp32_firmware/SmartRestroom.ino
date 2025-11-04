@@ -3,13 +3,13 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include "esp_sleep.h"
-#include <Preferences.h>      // เก็บค่าสะสมลงแฟลช (NVS)
-#include "esp_task_wdt.h"     // Watchdog
+#include <Preferences.h>      // ✅ ใช้ NVS (แฟลช) เก็บตัวนับข้ามการหลับ/รีบูต
+#include "esp_task_wdt.h"     // ✅ Hardware Task Watchdog (กันค้าง)
 
-#include "send_to_backend.h"  // ส่งขึ้น backend (WiFi + HTTP JSON)
-#include "send_to_line.h"     // แจ้งเตือนเข้า LINE OA
+#include "send_to_backend.h"  // ✅ ส่งสถานะไป Backend ผ่าน HTTP JSON
+#include "send_to_line.h"     // ✅ แจ้งเตือนเข้า LINE OA (push message)
 
-/* ===== Pins ===== */
+/* ====== กำหนดขาต่าง ๆ ของระบบ ====== */
 #define PIR1 27
 #define PIR2 26
 #define PIR3 25
@@ -17,71 +17,74 @@
 #define LED2 17
 #define LED3 16
 #define BUZZER_PIN 19
-#define RESET_BTN 34   // GPIO34 ไม่มี internal pull-up/down -> ต้องมี pull-down ภายนอก
+#define RESET_BTN 34   // ⚠️ GPIO34 เป็น input-only และไม่มี internal pull-up/down -> ต้องมี pull-down ภายนอกจริง
 
-/* ---- Reed switches (door) ----
+/* ---- Reed switches (ประตู) ----
  * ใช้ GPIO 32, 33, 35 (input-only, ไม่มี internal pull-up/down)
- * แนะนำ: ต่อ pull-up ภายนอก แล้วให้ reed ต่อเข้ากราวด์
- * => เมื่อ "ประตูปิด" (reed ปิดวงจร) digitalRead() จะ LOW
+ * แนะนำ: ต่อ pull-up ภายนอก แล้วให้ reed ต่อกราวด์
+ * => เมื่อ "ประตูปิด" (reed ปิดวงจร) digitalRead() จะ LOW (เพราะดึงลงกราวด์)
  */
 #define DOOR1 32
 #define DOOR2 33
 #define DOOR3 35
-const bool REED_ACTIVE_LOW = true;   // true: LOW = ประตูปิด
+const bool REED_ACTIVE_LOW = true;   // true = logic LOW แปลว่า "ประตูปิด"
 
-const bool LED_ACTIVE_LOW = false;
+const bool LED_ACTIVE_LOW = false; 
 
-const unsigned long DEBOUNCE_MS = 30;             // debounce ปุ่ม reset (double click)
-const unsigned long HOLD_ON_MS = 10UL * 1000UL;    // ดับไฟหลังไม่มี motion
-const unsigned int  USES_THRESHOLD_PER_ROOM = 5;  // ถึง 5 sessions -> ต้องทำความสะอาด
+/* ====== ค่าพารามิเตอร์ระบบ ====== */
+const unsigned long DEBOUNCE_MS = 30;              // หน่วงกันเด้งปุ่มสำหรับ double-click reset
+const unsigned long HOLD_ON_MS  = 10UL * 1000UL;   // เวลาคอยดับไฟเมื่อไม่มี motion ต่อเนื่อง (10s)
+const unsigned int  USES_THRESHOLD_PER_ROOM = 5;   // เกณฑ์จำนวนรอบการใช้งานต่อห้องก่อนแจ้ง "ต้องทำความสะอาด"
 const unsigned long TOTAL_MS_THRESHOLD_PER_ROOM =
-  2UL * 60UL * 1000UL;                            // หรือสะสม >=2 นาทีในห้อง
+  2UL * 60UL * 1000UL;                             // เกณฑ์เวลาสะสม >= 2 นาที ต่อห้องก่อนแจ้ง "ต้องทำความสะอาด"
 
-/* ===== Sleep Config ===== */
-static const unsigned long SLEEP_IDLE_MS = 2UL * 60UL * 1000UL;  // ว่างเกิน 2 นาที -> เข้าหลับ
+/* ====== โหมดประหยัดพลังงาน (Light Sleep) ====== */
+static const unsigned long SLEEP_IDLE_MS = 2UL * 60UL * 1000UL;  // ถ้าห้องว่างทุกห้องนานเกิน 2 นาที -> เข้าหลับ
 static const uint64_t LIGHT_SLEEP_INTERVAL_US =
-  5ULL * 60ULL * 1000000ULL;                                // ตื่นเองทุก ~5 นาที
-const unsigned long AWAKE_HOLDOFF_MS = 1500;                // กันหลับเร็วเกินหลังตื่น
+  5ULL * 60ULL * 1000000ULL; // ปลุกตัวเองอัตโนมัติทุก ~5 นาที (heartbeat)
+const unsigned long AWAKE_HOLDOFF_MS = 1500;       // ตื่นมาแล้วอย่างน้อย 1.5s ก่อนค่อยหลับใหม่
 static unsigned long lastWakeMs = 0;
 
-/* ===== Watchdog Config ===== */
-#define WDT_TIMEOUT_SEC 10  // ถ้า loop ไม่ feed เกิน 10 วิ -> รีเซ็ต
+/* ====== Watchdog ====== */
+// ถ้า loop ไม่ feed ภายใน 10 วินาที จะ trigger panic -> รีบูตอัตโนมัติ
+#define WDT_TIMEOUT_SEC 10
 
-/* ===== Buzzer ===== */
-const unsigned long BUZZER_TOGGLE_MS = 3000UL;
+/* ====== Buzzer (เตือนเมื่อถึงเกณฑ์ต้องทำความสะอาด) ====== */
+const unsigned long BUZZER_TOGGLE_MS = 3000UL;     // กระพริบเสียงเข้า/ออกทุก 3 วินาทีตอนแจ้งเตือน
 bool buzzerState = false;
 unsigned long lastBuzzerToggle = 0;
 
-/* ===== OLED ===== */
+/* ====== OLED Display ====== */
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_ADDR 0x3C
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
-bool oledOn = true;
+bool oledOn = true; // ธงบอกสถานะจอเปิด/ปิด (ใช้ตอน sleep)
 
-/* ===== Runtime State ===== */
+/* ====== โครงสร้างสถานะของแต่ละห้อง (runtime เฉพาะรอบปัจจุบัน) ====== */
 struct RoomState {
-  bool lightOn = false;          // มีคนอยู่ตอนนี้ไหม
-  unsigned long lastMotionMs = 0;
-  unsigned long sessionStartMs = 0;
-  unsigned long uses = 0;        // นับกี่รอบแล้ว
-  bool needCleaning = false;     // ถึง threshold แล้วหรือยัง
+  bool lightOn = false;             // ตอนนี้ห้องกำลังถูกใช้งานอยู่หรือไม่ (true=มีคน)
+  unsigned long lastMotionMs = 0;   // เวลาเกิด motion ครั้งล่าสุด
+  unsigned long sessionStartMs = 0; // เวลาเริ่มรอบการใช้งานครั้งนี้
+  unsigned long uses = 0;           // จำนวนรอบการใช้งาน (นับเพิ่มตอนจบ session)
+  bool needCleaning = false;        // ธงว่าห้องนี้ถึงเกณฑ์ต้องทำความสะอาดแล้วหรือยัง
 } room[3];
 
-/* ===== Door states (Reed switches) ===== */
-bool doorClosed[3] = {false,false,false};   // true = ประตูปิด
+/* ====== สถานะประตู (รีดสวิตช์) ของแต่ละห้อง ====== */
+bool doorClosed[3] = {false,false,false}; // true = ประตูปิด (รีดปิดวงจร)
 
-/* ===== Backend glue / Global status ===== */
-bool cleaningRequired = false;     // ห้องไหนสักห้องต้องทำความสะอาด -> true
-unsigned long lastCleanTimestamp = 0; // เวลารีเซ็ตล่าสุด (ms from boot)
-Room rooms[3];                     // struct ที่ส่งขึ้น backend/LINE
+/* ====== ตัวแปรสำหรับเชื่อมต่อ Backend/LINE และ Persist ====== */
+bool cleaningRequired = false;      // ถ้ามีอย่างน้อยหนึ่งห้องที่ needCleaning -> true
+unsigned long lastCleanTimestamp = 0; // เวลาที่รีเซ็ตล่าสุด (ms นับจากบูต)
+Room rooms[3];                      // โครงสร้างที่ mirror state เพื่อนำไปส่ง backend
 
-bool backend_ok = false;           // true ถ้า POST backend ล่าสุด ok
+bool backend_ok = false;            // ธงผลล่าสุดที่ POST ไป backend (true=สำเร็จ)
 uint32_t reportUses[3]    = {0,0,0};
 uint32_t reportTotalMs[3] = {0,0,0};
 bool persistLoaded        = false;
 
-/* ===== Persist: RTC + NVS ===== */
+/* ====== Persist (เซฟค่าลง RTC + NVS) ====== */
+// เก็บตัวนับ uses, totalMs และธง needCleaning เพื่อให้คงอยู่ข้าม sleep/reboot
 typedef struct {
   uint32_t magic;
   uint32_t uses[3];
@@ -91,12 +94,12 @@ typedef struct {
 
 #define PERSIST_MAGIC 0xA55A2025
 
-RTC_DATA_ATTR PersistCounters persistRTC = {0};
-Preferences prefs;
+RTC_DATA_ATTR PersistCounters persistRTC = {0}; // เก็บลง RTC RAM (อยู่รอดตอน light sleep)
+Preferences prefs;                              // NVS สำหรับสำรองบนแฟลช
 
-/* ===== Persist Load/Save ===== */
+/* ====== โหลด/บันทึก Persist จาก/ลง NVS ====== */
 bool nvsLoad(PersistCounters &out) {
-  prefs.begin("restroom", true);
+  prefs.begin("restroom", true);                       // โหมดอ่าน
   size_t sz = prefs.getBytesLength("counters");
   bool ok = false;
   if (sz == sizeof(PersistCounters)) {
@@ -108,32 +111,38 @@ bool nvsLoad(PersistCounters &out) {
 }
 
 void nvsSave(const PersistCounters &in) {
-  prefs.begin("restroom", false);
+  prefs.begin("restroom", false);                      // โหมดเขียน
   prefs.putBytes("counters", &in, sizeof(PersistCounters));
   prefs.end();
 }
 
+/* ====== สร้างโครง Persist จากค่าปัจจุบันใน RAM ====== */
 inline void buildPersistFromRuntime(PersistCounters &out) {
   out.magic = PERSIST_MAGIC;
   for (int i=0;i<3;i++) {
-    out.uses[i]         = rooms[i].useCount;
+    out.uses[i]         = rooms[i].useCount;           // ดึงจาก struct ที่ส่ง backend
     out.totalMs[i]      = rooms[i].totalUseMS;
     out.needCleaning[i] = room[i].needCleaning ? 1 : 0;
   }
 }
 
+/* ====== โหลด Persist เข้าสู่ตัวแปร runtime ====== */
 void loadPersistIntoRuntime() {
   PersistCounters tmp = {0};
   bool loaded = false;
 
+  // 1) ถ้ามีใน RTC แล้ว ใช้อันนั้นก่อน (เร็ว ไม่ต้องแตะแฟลช)
   if (persistRTC.magic == PERSIST_MAGIC) {
     tmp = persistRTC;
     loaded = true;
-  } else if (nvsLoad(tmp)) {
+  }
+  // 2) ถ้า RTC ไม่มี ลองอ่านจาก NVS (แฟลช)
+  else if (nvsLoad(tmp)) {
     loaded = true;
-    persistRTC = tmp;
+    persistRTC = tmp; // sync กลับเข้า RTC ด้วย
   }
 
+  // 3) ถ้าเจอข้อมูล -> โยนเข้า runtime
   if (loaded) {
     for (int i=0;i<3;i++) {
       room[i].uses         = tmp.uses[i];
@@ -142,12 +151,13 @@ void loadPersistIntoRuntime() {
       room[i].needCleaning = (tmp.needCleaning[i] != 0);
     }
   } else {
+    // 4) ไม่เจอข้อมูลเลย -> เริ่มใหม่และเซฟลง NVS
     memset(&persistRTC, 0, sizeof(persistRTC));
     persistRTC.magic = PERSIST_MAGIC;
     nvsSave(persistRTC);
   }
 
-  // sync snapshot สำหรับส่ง backend
+  // เตรียม snapshot สำหรับส่ง backend
   for (int i=0;i<3;i++) {
     reportUses[i]    = rooms[i].useCount;
     reportTotalMs[i] = rooms[i].totalUseMS;
@@ -155,7 +165,7 @@ void loadPersistIntoRuntime() {
   persistLoaded = true;
 }
 
-/* ===== Snapshot helper (ใช้ทุกครั้งก่อนส่ง backend) ===== */
+/* ====== อัปเดต snapshot ก่อนส่ง backend ====== */
 inline void refreshReportSnapshotFromRuntime() {
   for (int i=0;i<3;i++) {
     reportUses[i]    = rooms[i].useCount;
@@ -163,18 +173,21 @@ inline void refreshReportSnapshotFromRuntime() {
   }
 }
 
-/* ===== Small helpers ===== */
+/* ====== Helper คุม LED แบบรองรับ active-low ====== */
 inline void setLed(int pin, bool on) {
   if (LED_ACTIVE_LOW) digitalWrite(pin, on ? LOW : HIGH);
   else                digitalWrite(pin, on ? HIGH : LOW);
 }
 
-void buzzerOn()  { pinMode(BUZZER_PIN, OUTPUT); digitalWrite(BUZZER_PIN, LOW); }
-void buzzerOff() { pinMode(BUZZER_PIN, INPUT); }
+/* ====== Buzzer ====== */
+void buzzerOn()  { pinMode(BUZZER_PIN, OUTPUT); digitalWrite(BUZZER_PIN, LOW); } // โมดูลบางแบบ trigger LOW
+void buzzerOff() { pinMode(BUZZER_PIN, INPUT); }                                 // ปล่อยขาให้ Hi-Z = เงียบ
 
+/* ====== อ่านรีดสวิตช์ (สถานะประตู) ====== */
 inline bool readDoorRaw(int pin) {
   int v = digitalRead(pin);
-  return REED_ACTIVE_LOW ? (v == LOW) : (v == HIGH); // true = closed
+  // กำหนดทิศทางไว้ชัด: ถ้า REED_ACTIVE_LOW = true -> LOW แปลว่าประตูปิด
+  return REED_ACTIVE_LOW ? (v == LOW) : (v == HIGH);
 }
 
 inline void readAllDoors() {
@@ -183,7 +196,7 @@ inline void readAllDoors() {
   doorClosed[2] = readDoorRaw(DOOR3);
 }
 
-/* ===== OLED UI ===== */
+/* ====== ส่วนแสดงผลบนจอ OLED ====== */
 static void drawCenteredText(int size, const char* line, int y) {
   display.setTextSize(size);
   display.setTextColor(SSD1306_WHITE);
@@ -196,6 +209,7 @@ static void drawCenteredText(int size, const char* line, int y) {
 }
 
 void drawMainPage() {
+  // แสดงสถานะรวมของแต่ละห้อง + จำนวนรอบใช้งาน U
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
@@ -215,23 +229,19 @@ void drawMainPage() {
 }
 
 void drawCleaningOverlay() {
+  // โหมดแจ้ง "กำลังทำความสะอาด" พร้อมกรอบกระพริบ
   bool blink = (millis() / 500) % 2;
   display.clearDisplay();
   drawCenteredText(2, "CLEANING!", 8);
   if (blink) {
-    display.drawRoundRect(
-      2, 2,
-      SCREEN_WIDTH - 4,
-      SCREEN_HEIGHT - 4,
-      6,
-      SSD1306_WHITE
-    );
+    display.drawRoundRect(2, 2, SCREEN_WIDTH - 4, SCREEN_HEIGHT - 4, 6, SSD1306_WHITE);
   }
   drawCenteredText(1, "Please wait...", 44);
   display.display();
 }
 
 void showResetToast() {
+  // แสดงข้อความสั้น ๆ เมื่อรีเซ็ตตัวนับเสร็จ
   display.clearDisplay();
   drawCenteredText(2, "Counters", 18);
   drawCenteredText(2, "Reset",    36);
@@ -239,28 +249,27 @@ void showResetToast() {
   delay(800);
 }
 
-/* ===== mirrorRoomToBackendStruct ===== */
+/* ====== mirrorRoomToBackendStruct: สะท้อนสถานะเพื่อส่ง backend ====== */
 void mirrorRoomToBackendStruct(int idx, int pirPin, int ledPin) {
-  rooms[idx].pirPin          = pirPin;
-  rooms[idx].ledPin          = ledPin;
-  rooms[idx].occupied        = room[idx].lightOn;
-  // prevOccupied ไม่ได้ใช้ใน logic ตอนนี้
+  rooms[idx].pirPin   = pirPin;
+  rooms[idx].ledPin   = ledPin;
+  rooms[idx].occupied = room[idx].lightOn;  // ตรงนี้คือแกนหลักที่ backend ใช้แสดงว่าง/ไม่ว่าง
 }
 
-/* ===== cleaningRequired flag (อย่างน้อย 1 ห้อง dirty) ===== */
+/* ====== อัปเดตธงรวมว่ามีห้องไหนต้องทำความสะอาดไหม ====== */
 void updateCleaningRequiredFlag() {
   cleaningRequired = false;
   for (int i=0;i<3;i++) {
     if (room[i].needCleaning) {
-      cleaningRequired = true;
+      cleaningRequired = true;    // ถ้ามีซักห้อง -> ธงรวม = true
       break;
     }
   }
 }
 
-/* ===== ปุ่มรีเซตแบบ "กด 2 ครั้ง" ===== */
-const unsigned long BOOT_GRACE_MS    = 5000;
-const unsigned long DOUBLE_WINDOW_MS = 800;
+/* ====== ปุ่มรีเซ็ตแบบ "กด 2 ครั้งติดกัน" เพื่อกันกดพลาด ====== */
+const unsigned long BOOT_GRACE_MS    = 5000; // กันกดตอนบูต 5s แรก
+const unsigned long DOUBLE_WINDOW_MS = 800;  // ต้องกดครั้งที่ 2 ภายใน 0.8s
 
 unsigned long bootAtMs      = 0;
 static int btnLastStable    = LOW;
@@ -270,26 +279,31 @@ static bool firstClickArmed = false;
 
 bool readButtonDoublePressed() {
   unsigned long now = millis();
-  if (now - bootAtMs < BOOT_GRACE_MS) return false;
+  if (now - bootAtMs < BOOT_GRACE_MS) return false; // ยังไม่รับกดช่วงบูต
 
   int raw = digitalRead(RESET_BTN);
+  // ตรวจจับขอบสัญญาณแบบหน่วงกันเด้ง
   if (raw != btnLastStable && now - btnLastChange >= DEBOUNCE_MS) {
     btnLastChange = now;
     btnLastStable = raw;
 
-    if (btnLastStable == HIGH) {
+    if (btnLastStable == HIGH) { // นับเฉพาะตอนปล่อยเป็น HIGH (หรือเลือกตอนกดก็ได้ตามวงจร)
       if (!firstClickArmed) {
+        // ครั้งที่ 1 -> ติดธงรอครั้งที่ 2
         firstClickArmed = true;
         firstClickAt = now;
       } else if (now - firstClickAt <= DOUBLE_WINDOW_MS) {
+        // ครั้งที่ 2 มาทันเวลา -> นับว่า double click สำเร็จ
         firstClickArmed = false;
         return true;
       } else {
+        // คลิกช้าไป -> เลื่อนหน้าต่างใหม่
         firstClickAt = now;
       }
     }
   }
 
+  // ถ้ารอครั้งที่สองนานเกินหน้าต่าง -> ยกเลิก
   if (firstClickArmed && (now - firstClickAt > DOUBLE_WINDOW_MS)) {
     firstClickArmed = false;
   }
@@ -297,38 +311,49 @@ bool readButtonDoublePressed() {
   return false;
 }
 
-/* ===== Room logic (PIR + Door) ===== */
+/* ====== แกนหลักตรวจจับ "เข้า/ออกห้อง" (PIR + ประตู) ======
+ * กติกา:
+ * - เริ่ม "ใช้งาน" เมื่อ PIR มี motion + ประตูปิดและยังไม่อยู่ในสถานะใช้งาน
+ * - จบ "ใช้งาน" เมื่อประตูเปิด หรือไม่มี motion เกิน HOLD_ON_MS
+ */
 void updateRoom(int idx, int pirPin, int ledPin, unsigned long now) {
   int  motion       = digitalRead(pirPin);
   bool doorIsClosed = doorClosed[idx];
 
+  /* --- เริ่ม session --- */
   if (motion == HIGH) {
-    // เริ่ม session ใหม่ เมื่อ PIR จับได้ + ประตูปิด
+    // เริ่ม session ใหม่ เฉพาะเมื่อ "ยังไม่ ON" และ "ประตูปิด"
     if (!room[idx].lightOn && doorIsClosed) {
       room[idx].lightOn        = true;
       room[idx].sessionStartMs = now;
-      setLed(ledPin, true);
+      setLed(ledPin, true);  // เปิดไฟในห้อง
       Serial.printf("[R%d] ON (motion + door closed)\n", idx+1);
 
+      // อัปเดตโครงสร้างสำหรับ backend และคำนวณธงรวม
       mirrorRoomToBackendStruct(idx, pirPin, ledPin);
       updateCleaningRequiredFlag();
 
+      // ส่ง snapshot ปัจจุบันขึ้น backend (บันทึกว่าเริ่มใช้งานแล้ว)
       refreshReportSnapshotFromRuntime();
-      sendStatusImmediately();   // ส่งขึ้น backend
+      sendStatusImmediately();
     }
+    // บันทึกเวลามี motion ล่าสุด (ใช้ตัดสินใจ timeout)
     room[idx].lastMotionMs = now;
   }
 
-  // จบ session: ประตูเปิดออก OR timeout ไม่มี motion นานเกิน HOLD_ON_MS
+  /* --- จบ session --- */
   bool timeout           = room[idx].lightOn && (now - room[idx].lastMotionMs > HOLD_ON_MS);
   bool doorOpenedWhileOn = room[idx].lightOn && !doorIsClosed;
 
   if (timeout || doorOpenedWhileOn) {
+    // ปิดสถานะใช้งาน + ดับไฟ
     room[idx].lightOn = false;
     setLed(ledPin, false);
-    room[idx].uses++;
 
+    // นับจำนวนรอบ และบันทึกเวลาที่ใช้ไปในรอบนี้
+    room[idx].uses++;
     unsigned long dur = now - room[idx].sessionStartMs;
+
     Serial.printf(
       "[R%d] OFF (%s) | dur=%.2f min | uses=%lu\n",
       idx+1,
@@ -337,10 +362,11 @@ void updateRoom(int idx, int pirPin, int ledPin, unsigned long now) {
       room[idx].uses
     );
 
+    // อัปเดตค่าที่สะสมไว้เพื่อส่ง backend/เก็บ persist
     rooms[idx].useCount    = room[idx].uses;
     rooms[idx].totalUseMS += dur;
 
-    // ถ้าถึงเกณฑ์ -> ติดธง needCleaning และยิง LINE
+    // ตรวจเกณฑ์ "ต้องทำความสะอาด": ตามจำนวนครั้ง หรือ เวลาสะสม
     if (!room[idx].needCleaning &&
         (room[idx].uses >= USES_THRESHOLD_PER_ROOM ||
          rooms[idx].totalUseMS >= TOTAL_MS_THRESHOLD_PER_ROOM)) {
@@ -348,20 +374,23 @@ void updateRoom(int idx, int pirPin, int ledPin, unsigned long now) {
       room[idx].needCleaning = true;
       Serial.printf("[R%d] -> Clean\n", idx+1);
 
-      wifiEnsure(); // เช็ค WiFi ก่อนส่ง LINE
+      // แจ้ง LINE ให้แม่บ้านทราบ (ensure WiFi ก่อน)
+      wifiEnsure();
       notifyCleaningRequired(idx, room[idx].uses);
     }
 
+    // อัปเดตภาพสะท้อนไป backend + ธงรวม แล้วส่งสถานะล่าสุด
     mirrorRoomToBackendStruct(idx, pirPin, ledPin);
     updateCleaningRequiredFlag();
 
     refreshReportSnapshotFromRuntime();
-    sendStatusImmediately();  // แจ้ง backend หลังปิด session
+    sendStatusImmediately();
   }
 }
 
-/* ===== Reset Action (แม่บ้านมากดรีเซต) ===== */
+/* ====== รีเซ็ตตัวนับทั้งหมด (แม่บ้านมากดเมื่อทำความสะอาดแล้ว) ====== */
 void doResetCounters() {
+  // ล้างตัวนับทุกห้อง
   for (int i = 0; i < 3; i++) {
     room[i].uses         = 0;
     room[i].needCleaning = 0;
@@ -369,30 +398,29 @@ void doResetCounters() {
     rooms[i].totalUseMS  = 0;
   }
 
-  lastCleanTimestamp = millis();
+  lastCleanTimestamp = millis(); // บันทึกเวลาที่รีเซ็ต
   updateCleaningRequiredFlag();
-  buzzerOff();
-  buzzerState = false;
+  buzzerOff(); buzzerState = false;
 
+  // สร้างข้อมูล persist จาก runtime แล้วเซฟลง RTC + NVS
   PersistCounters tmp;
   buildPersistFromRuntime(tmp);
   persistRTC = tmp;
   nvsSave(tmp);
 
+  // แจ้ง backend ว่ารีเซ็ตแล้ว + ขึ้นหน้าจอ
   refreshReportSnapshotFromRuntime();
   Serial.println("[RESET] All counters cleared.");
   showResetToast();
-  sendStatusImmediately(); // backend แจ้งว่าทำความสะอาดแล้ว
+  sendStatusImmediately();
 
-  // แจ้ง LINE ให้รู้ว่าเคลียร์แล้ว
+  // แจ้ง LINE บอกว่าเคลียร์แล้ว
   wifiEnsure();
   notifyCountersReset();
 }
 
-/* ===== Light Sleep (ประหยัดพลังงาน) ===== */
-static inline uint64_t rtcMaskFor(uint8_t gpio) {
-  return (1ULL << gpio);
-}
+/* ====== Utilities เกี่ยวกับการ Sleep/จอ ====== */
+static inline uint64_t rtcMaskFor(uint8_t gpio) { return (1ULL << gpio); }
 
 void oledOff() {
   if (oledOn) {
@@ -410,19 +438,36 @@ void oledOnWake() {
   }
 }
 
-bool heartbeatOnWake = false;
+bool heartbeatOnWake = false; // ธงว่าเพิ่งตื่นจาก timer (ปลุกทุก ~5 นาที)
 
+/* ====== พยายามเข้าหลับ (Light Sleep) เมื่อระบบว่าง ======
+ * เงื่อนไขเข้าหลับ:
+ * - ตื่นมานานพอ (AWAKE_HOLDOFF_MS)
+ * - ทุกห้องว่าง และไม่มีธง cleaningRequired
+ * - ไม่มี motion รวมกันนานเกิน SLEEP_IDLE_MS
+ * ปลุกได้จาก: PIR/ปุ่ม (EXT1) หรือ RTC timer 5 นาที
+ */
 void maybeEnterLightSleep(unsigned long now) {
+  // 1) ยังไม่ตื่นมานานพอ
   if (now - lastWakeMs < AWAKE_HOLDOFF_MS) return;
+
+  // 2) ยังมีห้องใช้งานอยู่
   if (room[0].lightOn || room[1].lightOn || room[2].lightOn) return;
+
+  // 3) ยังมีห้องต้องทำความสะอาด
   if (cleaningRequired) return;
+
+  // 4) ถ้ามีประตูบานไหนยังปิดอยู่ (reed = closed) ไม่ต้องหลับ
+  if (doorClosed[0] || doorClosed[1] || doorClosed[2]) {
+    return;
+  }
 
   unsigned long lastAnyMotion =
     max(room[0].lastMotionMs, max(room[1].lastMotionMs, room[2].lastMotionMs));
 
   if (now - lastAnyMotion < SLEEP_IDLE_MS) return;
 
-  // ก่อนหลับ เซฟ persist ล่าสุดไว้ใน RTC + NVS
+  // ก่อนหลับ: เซฟ persist ล่าสุด (กันไฟดับ/ตื่นมาแล้วตัวนับไม่ตรง)
   PersistCounters tmp;
   buildPersistFromRuntime(tmp);
   persistRTC = tmp;
@@ -431,7 +476,7 @@ void maybeEnterLightSleep(unsigned long now) {
   buzzerOff();
   oledOff();
 
-  // ปลุกได้จาก PIR/ปุ่ม หรือปลุกเองทุก 5 นาที
+  // ตั้งเงื่อนไขปลุก: PIR ทั้ง 3 + ปุ่ม reset + timer 5 นาที
   uint64_t mask = rtcMaskFor(PIR1) |
                   rtcMaskFor(PIR2) |
                   rtcMaskFor(PIR3) |
@@ -444,47 +489,44 @@ void maybeEnterLightSleep(unsigned long now) {
   Serial.println("[SLEEP] Enter LIGHT SLEEP (idle). Wake: PIR/BTN + 5m timer");
   Serial.flush();
 
+  // เข้าหลับจริง
   esp_light_sleep_start();
+
+  // ตรวจเหตุปลุก
   esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
   lastWakeMs = millis();
 
   if (cause == ESP_SLEEP_WAKEUP_EXT1) {
-    oledOnWake();           // มีคนเข้าห้อง -> เปิดจอ
+    // มีการเคลื่อนไหว/กดปุ่ม -> เปิดจอ
+    oledOnWake();
   } else if (cause == ESP_SLEEP_WAKEUP_TIMER) {
-    heartbeatOnWake = true; // ตื่นตามรอบ -> heartbeat ไป backend/LINE
+    // ปลุกตามรอบ -> ทำ heartbeat หลังจากนี้ใน loop()
+    heartbeatOnWake = true;
   }
 }
 
-/* ===== setup() ===== */
+/* ====== setup(): ตั้งค่าฮาร์ดแวร์และวอร์มระบบ ====== */
 void setup() {
   Serial.begin(115200);
   delay(50);
 
+  // บอกเหตุปลุก (เพื่อดีบัก)
   esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-  if (cause == ESP_SLEEP_WAKEUP_EXT1)
-    Serial.println("[WAKE] From EXT1");
-  else if (cause == ESP_SLEEP_WAKEUP_TIMER)
-    Serial.println("[WAKE] From TIMER");
-  else
-    Serial.println("[BOOT] Power-on/reset");
+  if (cause == ESP_SLEEP_WAKEUP_EXT1)      Serial.println("[WAKE] From EXT1");
+  else if (cause == ESP_SLEEP_WAKEUP_TIMER)Serial.println("[WAKE] From TIMER");
+  else                                     Serial.println("[BOOT] Power-on/reset");
 
-  pinMode(PIR1, INPUT);
-  pinMode(PIR2, INPUT);
-  pinMode(PIR3, INPUT);
+  // ตั้งโหมดขาต่าง ๆ
+  pinMode(PIR1, INPUT); pinMode(PIR2, INPUT); pinMode(PIR3, INPUT);
+  pinMode(LED1, OUTPUT); pinMode(LED2, OUTPUT); pinMode(LED3, OUTPUT);
+  pinMode(RESET_BTN, INPUT); // ⚠️ ต้องมีตัวต้านทาน pull-down ภายนอกจริง
+  
+  pinMode(DOOR1, INPUT); pinMode(DOOR2, INPUT); pinMode(DOOR3, INPUT); // ⚠️ ต้องมี pull-up ภายนอกสำหรับ reed
 
-  pinMode(LED1, OUTPUT);
-  pinMode(LED2, OUTPUT);
-  pinMode(LED3, OUTPUT);
-
-  pinMode(RESET_BTN, INPUT); // ต้องมี pull-down ภายนอกจริง
-
-  // Reed switches: ต้องมี pull-up ภายนอก (GPIO32/33/35 ไม่มี internal pullup)
-  pinMode(DOOR1, INPUT);
-  pinMode(DOOR2, INPUT);
-  pinMode(DOOR3, INPUT);
-
+  // ปิด buzzer ไว้ก่อน
   buzzerOff();
 
+  // เริ่มใช้งานจอ OLED
   Wire.begin(21,22);
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
     Serial.println("[ERR] SSD1306 not found");
@@ -499,24 +541,31 @@ void setup() {
     delay(800);
   }
 
+  // สร้าง mirror โครงสร้างส่ง backend สำหรับทั้ง 3 ห้อง
   mirrorRoomToBackendStruct(0,PIR1,LED1);
   mirrorRoomToBackendStruct(1,PIR2,LED2);
   mirrorRoomToBackendStruct(2,PIR3,LED3);
 
+  // โหลดตัวนับที่เคยบันทึก (ถ้ามี) + คำนวณธงรวม
   loadPersistIntoRuntime();
   updateCleaningRequiredFlag();
 
+  // ส่ง snapshot เริ่มต้นไป backend (เพื่อแสดงสถานะทันที)
   refreshReportSnapshotFromRuntime();
-  sendStatusImmediately(); // แจ้ง backend สถานะเริ่มต้น
+  sendStatusImmediately();
 
+  // บันทึกเวลาตอนบูต/ตื่น
   bootAtMs   = millis();
   lastWakeMs = millis();
 
-  // ---------- Watchdog init ----------
+  /* ---------- Watchdog init (กันค้าง) ----------
+   * ตั้ง timeout=10s และ trigger_panic=true (ให้รีบูตเมื่อค้าง)
+   * จากนั้น add task ปัจจุบันเข้า watchdog
+   */
   {
     esp_task_wdt_config_t wdt_config = {
-      .timeout_ms    = WDT_TIMEOUT_SEC * 1000, // ms
-      .trigger_panic = true                   // ถ้าค้าง -> reset
+      .timeout_ms    = WDT_TIMEOUT_SEC * 1000,
+      .trigger_panic = true
     };
 
     esp_err_t err = esp_task_wdt_init(&wdt_config);
@@ -534,31 +583,39 @@ void setup() {
   Serial.println("=== Smart Restroom (LINE Alerts + Persist + Sleep + WDT) ===");
 }
 
-/* ===== loop() ===== */
+/* ====== loop(): วนหลักของระบบ ======
+ * ลำดับหลัก:
+ * 1) อ่านสถานะประตู → อัปเดตแต่ละห้อง (PIR + ประตู) → เช็คปุ่ม reset
+ * 2) ถ้าตื่นจาก RTC timer -> ส่ง heartbeat (backend + LINE)
+ * 3) วาดจอทุก ~250ms
+ * 4) ส่ง heartbeat ปกติทุก 10s (ตอนที่ยัง active)
+ * 5) ควบคุม buzzer เมื่อถึงเกณฑ์ทำความสะอาด
+ * 6) พิจารณาเข้าหลับถ้าว่างนาน
+ * 7) feed watchdog ให้แน่ใจว่าไม่ค้าง
+ */
 void loop() {
   unsigned long now = millis();
 
+  /* 1) อ่านประตู + อัปเดต 3 ห้อง */
   readAllDoors();
-
-  // อัปเดต 3 ห้อง
   updateRoom(0, PIR1, LED1, now);
   updateRoom(1, PIR2, LED2, now);
   updateRoom(2, PIR3, LED3, now);
 
-  // ปุ่มรีเซต (double click)
+  // ปุ่มรีเซ็ตแบบ double click
   if (readButtonDoublePressed()) {
     doResetCounters();
   }
 
-  // ตื่นจาก sleep แบบ timer (heartbeat ช่วงห้องว่าง)
+  /* 2) ตื่นจาก sleep แบบ timer: ทำ heartbeat */
   if (heartbeatOnWake) {
     heartbeatOnWake = false;
 
     updateCleaningRequiredFlag();
     refreshReportSnapshotFromRuntime();
-    sendStatusImmediately(); // backend heartbeat
+    sendStatusImmediately(); // ส่ง backend
 
-    // LINE heartbeat summary (ถ้าไม่อยากให้เด้งบ่อย ปิดบล็อกนี้ได้)
+    // แจ้ง LINE แบบย่อ (ถ้าไม่อยากให้เด้งบ่อยสามารถคอมเมนต์บล็อกนี้ออก)
     wifiEnsure();
     notifyHeartbeatSummary(
       cleaningRequired,
@@ -568,7 +625,7 @@ void loop() {
     );
   }
 
-  // อัปเดต OLED ทุก ~250ms
+  /* 3) วาดจอทุก ~250ms */
   static unsigned long lastDraw=0;
   if (oledOn && millis()-lastDraw>250) {
     if (cleaningRequired) drawCleaningOverlay();
@@ -576,7 +633,7 @@ void loop() {
     lastDraw = millis();
   }
 
-  // heartbeat ปกติทุก 10s (ระหว่าง active)
+  /* 4) heartbeat ปกติทุก 10s (เฉพาะช่วงที่ยัง active และไม่ติดธง cleaning) */
   static unsigned long lastBeat=0;
   if (millis()-lastBeat>10000UL) {
     lastBeat = millis();
@@ -588,11 +645,11 @@ void loop() {
     if (!idleTooLong && !cleaningRequired) {
       updateCleaningRequiredFlag();
       refreshReportSnapshotFromRuntime();
-      sendStatusImmediately(); // backend only
+      sendStatusImmediately();
     }
   }
 
-  // Buzzer ถ้ามีห้องไหนต้องทำความสะอาด
+  /* 5) คุมเสียง buzzer ถ้ามีห้องไหนต้องทำความสะอาด */
   if (cleaningRequired) {
     if (millis()-lastBuzzerToggle>=BUZZER_TOGGLE_MS) {
       buzzerState=!buzzerState;
@@ -601,20 +658,22 @@ void loop() {
       lastBuzzerToggle=millis();
     }
   } else if (buzzerState) {
+    // ถ้าหาย dirty แล้วให้ปิดเสียง
     buzzerOff();
     buzzerState=false;
   }
 
-  // ลองเข้าหลับประหยัดพลังงาน
+  /* 6) ลองเข้าหลับ ถ้าระบบว่างนานพอ */
   maybeEnterLightSleep(now);
 
-  // ✅ feed watchdog ให้รู้ว่า loop ยังไม่ค้าง
+  /* 7) Feed Watchdog: แสดง log ทุก ~2s และรีเฟรช watchdog ทุกลูป */
   static unsigned long lastFeedPrint = 0;
-  if (millis() - lastFeedPrint > 2000) {  // พิมพ์ log ทุก 2 วินาที
+  if (millis() - lastFeedPrint > 2000) {
     Serial.println("[WDT] feed watchdog");
     lastFeedPrint = millis();
   }
   esp_task_wdt_reset();
 
+  // เวลาหน่วงสั้น ๆ เพื่อให้ loop ไม่หนักเกินไป
   delay(5);
 }

@@ -53,7 +53,7 @@ export default function Overview() {
       update: "Last updated",
       status: { available: "✅ Available", occupied: "❌ Occupied", cleaning: "🧹 Cleaning" },
       lines: {
-        lastCleanTime: "Last cleaned at",
+        lastCleanTime: "Last cleaned",
         lastCleanBy: "Last cleaned by",
         lastIncident: "Usage Count",
         nextClean: "Next cleaning time",
@@ -72,14 +72,19 @@ export default function Overview() {
   // ---- ฟอร์แมตเวลา ----
   const fmtNowDate = new Intl.DateTimeFormat(lang === "th" ? "th-TH" : "en-GB", { timeZone: TZ }).format(now);
   const fmtNowTime = new Intl.DateTimeFormat(lang === "th" ? "th-TH" : "en-GB", {
-    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: TZ,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    timeZone: TZ,
   }).format(now);
-
-  // (formatDT removed)
 
   const formatTimeOnly = (date) =>
     new Intl.DateTimeFormat(lang === "th" ? "th-TH" : "en-GB", {
-      timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false,
+      timeZone: TZ,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
     }).format(date);
 
   // ---- BASE URL ----
@@ -94,11 +99,41 @@ export default function Overview() {
   ]);
   const [lastPacketAt, setLastPacketAt] = useState(null);
 
-  // เวลา “ทำความสะอาดล่าสุด”
+  // เวลา “ทำความสะอาดล่าสุด” ที่ frontend จะโชว์ (เวลาจริงของ browser ตอนตรวจพบการรีเซ็ต)
   const [lastCleanRealMs, setLastCleanRealMs] = useState(null);
+  // เก็บค่า last_clean_ts_ms ดิบจาก backend รอบก่อน เพื่อตรวจว่ามันเปลี่ยนไหม
+  const [lastCleanRaw, setLastCleanRaw] = useState(null);
+  // เอาไว้ถือค่าปัจจุบันของ lastCleanRealMs เพื่อใช้ใน fetchLatest (กัน stale)
+  const lastCleanRealRef = useRef(null);
+  useEffect(() => {
+    lastCleanRealRef.current = lastCleanRealMs;
+  }, [lastCleanRealMs]);
 
-  // --- จับ "เวลาเริ่มเข้า" ของแต่ละห้อง (ใช้ฝั่ง FE) ---
+  // จับเวลาเริ่มเข้าแต่ละห้อง (ใช้ทำ mm:ss ตอน occupied)
   const sessionStartRef = useRef({ 1: null, 2: null, 3: null });
+
+  // helper แปลง "กี่นาทีที่แล้ว" / "กี่ชั่วโมงที่แล้ว"
+  const formatElapsed = (ts) => {
+    if (ts == null) return "—";
+    const diff = Date.now() - ts;
+    if (diff < 0) return "—";
+
+    const mins = Math.floor(diff / 60000);
+    const hrs = Math.floor(mins / 60);
+    const minsRemain = mins % 60;
+
+    if (lang === "th") {
+      if (mins < 1) return "ภายใน 1 นาทีที่ผ่านมา";
+      if (mins < 60) return `${mins} นาทีที่ผ่านมา`;
+      if (minsRemain === 0) return `${hrs} ชั่วโมงที่ผ่านมา`;
+      return `${hrs} ชม. ${minsRemain} นาทีที่ผ่านมา`;
+    } else {
+      if (mins < 1) return "within 1 minute";
+      if (mins < 60) return `${mins} minutes ago`;
+      if (minsRemain === 0) return `${hrs} hours ago`;
+      return `${hrs}h ${minsRemain}m ago`;
+    }
+  };
 
   // ---- ดึงข้อมูลล่าสุด ----
   const fetchLatest = async () => {
@@ -110,60 +145,74 @@ export default function Overview() {
 
       setCleaningRequired(!!data.cleaning_required);
 
-      const ts_ms = data.ts_ms;
-      const last_clean_ms = data.last_clean_ts_ms;
-      if (typeof ts_ms === "number" && typeof last_clean_ms === "number") {
-        const delta = ts_ms - last_clean_ms;
-        const estimateMs = Date.now() - delta;
-        setLastCleanRealMs(estimateMs);
-      } else {
-        setLastCleanRealMs(null);
-      }
+      // ----- ตรวจว่ามีการรีเซ็ตจากฝั่ง ESP มั้ย -----
+      const incomingLastClean = data.last_clean_ts_ms ?? null;
+
+      // ใช้ functional update เพื่อใช้ค่าเดิมล่าสุด
+      setLastCleanRaw((prevRaw) => {
+        // ถ้า backend ส่งค่ามา และไม่เท่ารอบที่แล้ว → ถือว่าเพิ่งกดปุ่ม
+        if (incomingLastClean !== null && incomingLastClean !== prevRaw) {
+          setLastCleanRealMs(Date.now()); // เวลาโชว์ = เวลา browser ตอนนี้
+          return incomingLastClean;
+        }
+
+        // ถ้ายังไม่เคยมีค่าเลยจาก backend แต่สถานะบอกว่าไม่ต้องทำความสะอาด
+        // แล้วหน้าเรายังไม่เคยตั้งเวลา → ตั้งเวลาตอนนี้ไปก่อน
+        if (
+          incomingLastClean === null &&
+          data.cleaning_required === false &&
+          lastCleanRealRef.current === null
+        ) {
+          setLastCleanRealMs(Date.now());
+        }
+
+        return prevRaw;
+      });
 
       setLastPacketAt(new Date());
 
-      const prevRooms = rooms;
-      const mapState = (s) => (s === "vacant" ? "available" : s === "occupied" ? "occupied" : "cleaning");
+      // อัปเดตห้องแบบใช้ค่าก่อนหน้าเป็นฐาน
+      setRooms((prevRooms) => {
+        const mapState = (s) => (s === "vacant" ? "available" : s === "occupied" ? "occupied" : "cleaning");
 
-      const next = [1, 2, 3].map((rid, i) => {
-        const r = (data.rooms || []).find((x) => x.room_id === rid);
-        const status = r ? mapState(r.state) : "available";
-        const useCount = r ? r.use_count : 0;
-        const totalMs = r ? r.total_use_ms : 0;
+        return [1, 2, 3].map((rid, i) => {
+          const r = (data.rooms || []).find((x) => x.room_id === rid);
+          const status = r ? mapState(r.state) : "available";
+          const useCount = r ? r.use_count : 0;
+          const totalMs = r ? r.total_use_ms : 0;
 
-        const prevStatus = prevRooms[i]?.status ?? "available";
-        if (status === "occupied" && prevStatus !== "occupied") {
-          sessionStartRef.current[rid] = Date.now();
-        }
-        if (status !== "occupied" && prevStatus === "occupied") {
-          sessionStartRef.current[rid] = null;
-        }
+          const prevStatus = prevRooms[i]?.status ?? "available";
+          if (status === "occupied" && prevStatus !== "occupied") {
+            sessionStartRef.current[rid] = Date.now();
+          }
+          if (status !== "occupied" && prevStatus === "occupied") {
+            sessionStartRef.current[rid] = null;
+          }
 
-        const noteTh =
-          status === "occupied"
-            ? `กำลังใช้งาน (รวม ${(totalMs / 60000).toFixed(1)} นาที)`
-            : status === "cleaning"
-            ? "กำลังทำความสะอาด"
-            : L.onlyAvail;
-        const noteEn =
-          status === "occupied"
-            ? `In use (total ${(totalMs / 60000).toFixed(1)} min)`
-            : status === "cleaning"
-            ? "Being cleaned"
-            : L.onlyAvail;
+          const noteTh =
+            status === "occupied"
+              ? `กำลังใช้งาน (รวม ${(totalMs / 60000).toFixed(1)} นาที)`
+              : status === "cleaning"
+              ? "กำลังทำความสะอาด"
+              : L.onlyAvail;
+          const noteEn =
+            status === "occupied"
+              ? `In use (total ${(totalMs / 60000).toFixed(1)} min)`
+              : status === "cleaning"
+              ? "Being cleaned"
+              : L.onlyAvail;
 
-        return {
-          id: rid,
-          name: (lang === "th" ? i18n.th : i18n.en).roomNames[i],
-          status,
-          noteTh,
-          noteEn,
-          use: useCount,
-          totalMs,
-        };
+          return {
+            id: rid,
+            name: (lang === "th" ? i18n.th : i18n.en).roomNames[i],
+            status,
+            noteTh,
+            noteEn,
+            use: useCount,
+            totalMs,
+          };
+        });
       });
-
-      setRooms(next);
     } catch (e) {
       console.error(e);
     }
@@ -174,7 +223,8 @@ export default function Overview() {
     fetchLatest();
     const id = setInterval(fetchLatest, POLL_MS);
     return () => clearInterval(id);
-  }, [lang]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lang, base]);
 
   // ---- สไตล์สถานะห้อง ----
   const statusMap = useMemo(
@@ -200,16 +250,19 @@ export default function Overview() {
     }
     return formatTimeOnly(new Date(candidate));
   }, [now, lastCleanRealMs, lang]);
-
-  // ---- ทำความสะอาดล่าสุด: แสดง HH:mm เท่านั้น ----
-  const lastCleanTimeOnly = useMemo(() => {
-    return typeof lastCleanRealMs === "number" ? formatTimeOnly(new Date(lastCleanRealMs)) : "—";
+  
+  // ---- ทำความสะอาดล่าสุด: ให้แสดงเป็น HH:mm ----
+  const lastCleanText = useMemo(() => {
+    if (typeof lastCleanRealMs === "number") {
+      return formatTimeOnly(new Date(lastCleanRealMs));
+    }
+    return "—";
   }, [lastCleanRealMs, lang]);
 
   // ---- meta ----
   const meta = {
     title: L.title,
-    lastCleanTime: lastCleanTimeOnly,
+    lastCleanTime: lastCleanText, // ใช้อันที่เป็น "x นาทีที่ผ่านมา"
     lastCleanBy: lang === "th" ? "—" : "—",
     usageCount: rooms.reduce((s, r) => s + (r.use || 0), 0),
     cleanDueTime: nextCleanTimeText,
@@ -218,7 +271,11 @@ export default function Overview() {
   const availableCount = rooms.filter((r) => r.status === "available").length;
   const lastUpdateTimeOnly = lastPacketAt
     ? new Intl.DateTimeFormat(lang === "th" ? "th-TH" : "en-GB", {
-        timeZone: TZ, hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+        timeZone: TZ,
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
       }).format(lastPacketAt)
     : "—";
   const nowDateTime = `${fmtNowDate} ${fmtNowTime}`;
@@ -259,8 +316,10 @@ export default function Overview() {
         {/* Header */}
         <div className="flex items-start justify-between gap-3 mb-2 flex-wrap">
           {/* ซ้ายบน: “ห้องน้ำว่าง” */}
-          <div className="rounded-2xl border border-emerald-300/60 bg-emerald-200/80 backdrop-blur-md px-6 py-4 drop-shadow-md shadow-md text-emerald-900
-             flex flex-col items-center justify-center text-center min-h-[120px]">
+          <div
+            className="rounded-2xl border border-emerald-300/60 bg-emerald-200/80 backdrop-blur-md px-6 py-4 drop-shadow-md shadow-md text-emerald-900
+             flex flex-col items-center justify-center text-center min-h-[120px]"
+          >
             <div className="text-sm md:text-base opacity-80">{L.availableRooms}</div>
             <div className="leading-none font-extrabold tabular-nums" style={{ fontSize: "64px", lineHeight: "0.9" }}>
               {availableCount}
@@ -335,7 +394,9 @@ export default function Overview() {
               {L.cleaningOverlay}
             </div>
             <div className="mt-4 text-slate-600">
-              {lang === "th" ? "โปรดรอสักครู่ ขณะนี้อยู่ในช่วงทำความสะอาด" : "Please wait. Restroom is being cleaned."}
+              {lang === "th"
+                ? "โปรดรอสักครู่ ขณะนี้อยู่ในช่วงทำความสะอาด"
+                : "Please wait. Restroom is being cleaned."}
             </div>
           </motion.div>
         </div>
@@ -358,8 +419,12 @@ function RoomCard({ room, statusMap, L, lang }) {
     room.status === "available"
       ? L.onlyAvail
       : room.status === "occupied"
-      ? (lang === "th" ? `กำลังใช้งาน${room.elapsedText || ""}` : `In use${room.elapsedText || ""}`)
-      : (lang === "th" ? room.noteTh : room.noteEn);
+      ? lang === "th"
+        ? `กำลังใช้งาน${room.elapsedText || ""}`
+        : `In use${room.elapsedText || ""}`
+      : lang === "th"
+      ? room.noteTh
+      : room.noteEn;
 
   return (
     <motion.div

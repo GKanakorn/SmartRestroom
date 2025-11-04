@@ -8,7 +8,7 @@ import base64
 import httpx
 import json
 from pydantic import BaseModel
-from typing import List, Dict
+from typing import List, Dict, Optional
 from threading import Lock
 
 # =========================
@@ -27,8 +27,12 @@ app.add_middleware(
 # Globals
 # =========================
 
-# เก็บแพ็กเก็ตสถานะล่าสุดจาก ESP32
-_last_payload: StatusPayload | None = None
+# เก็บแพ็กเก็ตสถานะล่าสุดจาก ESP32 (แบบแปลงแล้ว)
+_last_payload: Optional[StatusPayload] = None
+
+# เก็บค่าเวลา "ดิบ" ที่ ESP ส่งมาจริง ๆ (เพราะใน model อาจจะไม่ได้ define ไว้)
+_last_clean_ts_ms: Optional[int] = None
+_ts_ms: Optional[int] = None
 
 # เก็บผลการประเมินความสะอาด (แบบประเมินจาก EvaluationPage)
 # NOTE: เก็บในหน่วยความจำ (RAM) ชั่วคราวก่อน / ยังไม่ได้เขียนลง DB
@@ -84,33 +88,34 @@ def build_status_text_for_line() -> str:
 # =========================
 
 async def line_reply_message(reply_token: str, message_text: str):
-    """
-    ใช้ LINE Reply API ตอบกลับข้อความของผู้ใช้ (ต้องใช้ replyToken สด ๆ)
-    """
-    url = "https://api.line.me/v2/bot/message/reply"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
-    }
-    body = {
-        "replyToken": reply_token,
-        "messages": [
-            {
-                "type": "text",
-                "text": message_text
-            }
-        ]
-    }
+  """
+  ใช้ LINE Reply API ตอบกลับข้อความของผู้ใช้ (ต้องใช้ replyToken สด ๆ)
+  """
+  url = "https://api.line.me/v2/bot/message/reply"
+  headers = {
+      "Content-Type": "application/json",
+      "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+  }
+  body = {
+      "replyToken": reply_token,
+      "messages": [
+          {
+              "type": "text",
+              "text": message_text
+          }
+      ]
+  }
 
-    # debug
-    print("[DEBUG] line_reply_message() sending to LINE ...")
-    print("[DEBUG] body:", body)
+  # debug
+  print("[DEBUG] line_reply_message() sending to LINE ...")
+  print("[DEBUG] body:", body)
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.post(url, headers=headers, json=body)
+  async with httpx.AsyncClient(timeout=10.0) as client:
+      r = await client.post(url, headers=headers, json=body)
 
-    print("[LINE reply] status =", r.status_code)
-    print("[LINE reply] resp   =", r.text)
+  print("[LINE reply] status =", r.status_code)
+  print("[LINE reply] resp   =", r.text)
+
 
 def verify_line_signature(raw_body: bytes, x_line_signature: str) -> bool:
     """
@@ -139,29 +144,45 @@ async def health():
         "service": "smartrestroom-backend"
     }
 
+
 @app.post("/api/restroom/status")
-async def receive_status(p: StatusPayload):
+async def receive_status(request: Request):
     """
     ESP32 ยิง POST มาที่นี่ทุกครั้งที่มีอัพเดต
     เราเก็บ payload ล่าสุดไว้ แล้วตอบกลับ 200 OK
+    เพิ่มเติม: เราดึง last_clean_ts_ms / ts_ms จาก JSON ดิบด้วย
     """
-    global _last_payload
+    global _last_payload, _last_clean_ts_ms, _ts_ms
+
+    # อ่าน json ดิบก่อน เพื่อให้ได้ทุก field ที่ ESP ส่งมา
+    raw = await request.json()
+
+    # เก็บเวลาจริงที่ ESP ส่งมา (ถ้ามี)
+    _last_clean_ts_ms = raw.get("last_clean_ts_ms")
+    _ts_ms = raw.get("ts_ms")
+
+    # จากนั้นค่อยแปลงเป็น model เดิมของคุณ
+    p = StatusPayload(**raw)
     _last_payload = p
 
     print("\n=== STATUS RECEIVED ===")
     print(f"device = {p.device_id}")
     print(f"clean? = {p.cleaning_required}")
+    print(f"last_clean_ts_ms(raw) = {_last_clean_ts_ms}")
+    print(f"ts_ms(raw)            = {_ts_ms}")
     for r in p.rooms:
         print(
             f"Room#{r.room_id}: {r.state} | "
             f"uses={r.use_count} | total={r.total_use_ms/60000:.2f} min"
         )
 
-    # ตอบกลับแบบไม่ใส่เวลา
+    # ตอบกลับแบบใส่เวลาที่เราเพิ่งรับมาเลย
     return {
         "ok": True,
         "device": p.device_id,
         "cleaning_required": p.cleaning_required,
+        "last_clean_ts_ms": _last_clean_ts_ms,
+        "ts_ms": _ts_ms,
         "rooms": [
             {
                 "room_id": r.room_id,
@@ -172,6 +193,7 @@ async def receive_status(p: StatusPayload):
             for r in p.rooms
         ],
     }
+
 
 @app.get("/api/restroom/status/latest")
 async def latest():
@@ -186,6 +208,9 @@ async def latest():
         "ok": True,
         "device": p.device_id,
         "cleaning_required": p.cleaning_required,
+        # ⬇⬇ ตอนนี้ส่งค่าที่เราเก็บจาก JSON ดิบจริง ๆ
+        "last_clean_ts_ms": _last_clean_ts_ms,
+        "ts_ms": _ts_ms,
         "rooms": [
             {
                 "room_id": r.room_id,
@@ -209,6 +234,7 @@ async def post_evaluation(record: EvaluationRecord):
         evaluation_records.append(record)
     print("[EVAL] new record =", record)
     return {"ok": True}
+
 
 @app.get("/api/evaluation")
 async def get_evaluation():
